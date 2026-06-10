@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>1ms Unicode Streamer & Stats</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #e0e0e0;
+            font-family: system-ui, -apple-system, sans-serif;
+            padding: 40px;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        .card {
+            background: #1e1e1e;
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            border: 1px solid #333;
+        }
+        h1 { margin-top: 0; color: #fff; font-size: 20px; }
+        .stat-box {
+            background: #2a2a2a;
+            padding: 16px;
+            border-radius: 8px;
+            font-size: 24px;
+            font-family: monospace;
+            color: #00ff66;
+            text-align: center;
+            margin: 15px 0;
+            border: 1px solid #444;
+        }
+        .top-chars {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            margin: 20px 0;
+        }
+        .char-card {
+            flex: 1;
+            background: #252525;
+            padding: 12px;
+            border-radius: 6px;
+            text-align: center;
+            border: 1px solid #3d3d3d;
+        }
+        .char-glyph {
+            font-size: 32px;
+            color: #ffcc00;
+            margin-bottom: 4px;
+            height: 45px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .char-count {
+            font-family: monospace;
+            font-size: 12px;
+            color: #aaa;
+        }
+        .preview {
+            background: #000;
+            padding: 12px;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 11px;
+            height: 60px;
+            overflow: hidden;
+            white-space: pre-wrap;
+            color: #888;
+            border: 1px solid #222;
+        }
+        .status-text { color: #aaa; font-size: 14px; }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h1>High-Frequency Unicode Stream & Analytics</h1>
+        <p class="status-text">Processing blocks at 1ms. Showing top 3 sampled characters using an associative array map.</p>
+        
+        <div class="stat-box" id="counter">0 blocks processed</div>
+
+        <div class="status-text">🏆 3 Most Common Characters (Sampled):</div>
+        <div class="top-chars">
+            <div class="char-card">
+                <div class="char-glyph" id="top1-char">-</div>
+                <div class="char-count" id="top1-count">0 hits</div>
+            </div>
+            <div class="char-card">
+                <div class="char-glyph" id="top2-char">-</div>
+                <div class="char-count" id="top2-count">0 hits</div>
+            </div>
+            <div class="char-card">
+                <div class="char-glyph" id="top3-char">-</div>
+                <div class="char-count" id="top3-count">0 hits</div>
+            </div>
+        </div>
+
+        <div class="status-text" style="margin-bottom: 8px;">Latest stream sample text:</div>
+        <div class="preview" id="preview">Generating Unicode table...</div>
+    </div>
+
+    <!-- Background worker handles timing loop and frequency tracking -->
+    <script id="worker-script" type="application/javascript">
+        self.onmessage = function() {
+            let chars = [];
+            for (let i = 33; i < 0x2FFFF; i++) {
+                if (i >= 0x7F && i <= 0x9F) continue;
+                if (i >= 0xD800 && i <= 0xDFFF) continue;
+                chars.push(String.fromCodePoint(i));
+            }
+            const unicodeBlock = chars.join('');
+            const totalCharsLength = chars.length;
+            
+            // Named Array / Dictionary to log character frequency count
+            let charFrequencyMap = {}; 
+
+            const targetInterval = 1.0; 
+            let nextTime = performance.now();
+            let totalOutputs = 0;
+
+            function runLoop() {
+                let currentTime = performance.now();
+                let batchCount = 0;
+
+                while (currentTime >= nextTime && batchCount < 10) {
+                    totalOutputs++;
+                    
+                    // Sample 20 random characters from this block to add into the named array
+                    for (let s = 0; s < 20; s++) {
+                        let randomIdx = Math.floor(Math.random() * totalCharsLength);
+                        let selectedChar = chars[randomIdx];
+                        
+                        // Increment named array tracking keys
+                        if (charFrequencyMap[selectedChar]) {
+                            charFrequencyMap[selectedChar]++;
+                        } else {
+                            charFrequencyMap[selectedChar] = 1;
+                        }
+                    }
+
+                    nextTime += targetInterval;
+                    batchCount++;
+                }
+
+                // Process and sort top 3 characters to update the interface
+                if (totalOutputs % 25 === 0) {
+                    let sortedChars = Object.keys(charFrequencyMap).map(key => {
+                        return { char: key, count: charFrequencyMap[key] };
+                    });
+                    
+                    // Sort descending based on hits
+                    sortedChars.sort((a, b) => b.count - a.count);
+                    
+                    // Pick top 3 slices safely
+                    let top3 = sortedChars.slice(0, 3);
+
+                    self.postMessage({ 
+                        count: totalOutputs, 
+                        sample: unicodeBlock.slice(0, 200),
+                        top3: top3
+                    });
+                }
+
+                setTimeout(runLoop, 0);
+            }
+            runLoop();
+        };
+    </script>
+
+    <script>
+        const counterEl = document.getElementById('counter');
+        const previewEl = document.getElementById('preview');
+        
+        const topEls = [
+            { char: document.getElementById('top1-char'), count: document.getElementById('top1-count') },
+            { char: document.getElementById('top2-char'), count: document.getElementById('top2-count') },
+            { char: document.getElementById('top3-char'), count: document.getElementById('top3-count') }
+        ];
+
+        const blob = new Blob([document.getElementById('worker-script').textContent], { type: 'application/javascript' });
+        const worker = new Worker(URL.createObjectURL(blob));
+
+        worker.onmessage = function(e) {
+            counterEl.textContent = e.data.count.toLocaleString() + " blocks processed";
+            previewEl.textContent = e.data.sample + "... [Truncated]";
+            
+            // Update the top 3 cards in the DOM hierarchy
+            if (e.data.top3) {
+                e.data.top3.forEach((item, index) => {
+                    if (topEls[index]) {
+                        topEls[index].char.textContent = item.char;
+                        topEls[index].count.textContent = item.count.toLocaleString() + " hits";
+                    }
+                });
+            }
+        };
+
+        worker.postMessage("start");
+    </script>
+</body>
+</html>

@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Arcane Cyber Cube — Holographic Dither Edition</title>
+<style>
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+  }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    background: transparent;
+    cursor: grab;
+  }
+  canvas:active {
+    cursor: grabbing;
+  }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<script>
+(() => {
+  const canvas = document.getElementById("scene");
+  const ctx = canvas.getContext("2d", { alpha: true });
+
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let W = window.innerWidth;
+  let H = window.innerHeight;
+
+  function resize() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.floor(W * dpr);
+    canvas.height = Math.floor(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // Safe visible BMP ranges supported out-of-the-box on Windows 10 (no combining marks/control chars)
+  const UNICODE_RANGES = [
+    [0x0041, 0x005A], // Latin Upper
+    [0x0061, 0x007A], // Latin Lower
+    [0x0391, 0x03A1], // Greek Upper
+    [0x03A3, 0x03A9], // Greek Upper 2
+    [0x0410, 0x042F], // Cyrillic
+    [0x0531, 0x0556], // Armenian
+    [0x05D0, 0x05EA], // Hebrew
+    [0x0627, 0x063A], // Arabic 1
+    [0x0641, 0x064A], // Arabic 2
+    [0x0905, 0x0939], // Devanagari
+    [0x0E01, 0x0E2E], // Thai Consonants
+    [0x10D0, 0x10F0], // Georgian
+    [0x3042, 0x3093], // Hiragana
+    [0x30A2, 0x30F3], // Katakana
+    [0xAC00, 0xD7A3], // Korean Hangul Syllables
+    [0x4E00, 0x9FFF], // CJK Unified Ideographs
+  ];
+
+  function forgeUnicodeString(len = 10) {
+    let out = [];
+    for (let i = 0; i < len; i++) {
+      const range = UNICODE_RANGES[(Math.random() * UNICODE_RANGES.length) | 0];
+      const cp = range[0] + ((Math.random() * (range[1] - range[0] + 1)) | 0);
+      out.push(String.fromCodePoint(cp));
+    }
+    return out;
+  }
+
+  // Hex color helpers
+  function randomHexColor(minLum = 55) {
+    while (true) {
+      const r = (Math.random() * 256) | 0;
+      const g = (Math.random() * 256) | 0;
+      const b = (Math.random() * 256) | 0;
+      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      if (lum >= minLum) return { r, g, b };
+    }
+  }
+
+  function lerpColor(a, b, t) {
+    return {
+      r: a.r + (b.r - a.r) * t,
+      g: a.g + (b.g - a.g) * t,
+      b: a.b + (b.b - a.b) * t,
+    };
+  }
+
+  function rgbStr(c, alpha = 1) {
+    return `rgba(${c.r | 0}, ${c.g | 0}, ${c.b | 0}, ${alpha})`;
+  }
+
+  function hexStr(c) {
+    const h = (v) => Math.max(0, Math.min(255, v | 0)).toString(16).padStart(2, "0").toUpperCase();
+    return `#${h(c.r)}${h(c.g)}${h(c.b)}`;
+  }
+
+  // State (70% smaller: 0.145 * 0.30 = 0.0435)
+  const state = {
+    cx: W * 0.5,
+    cy: H * 0.52,
+    scale: Math.min(W, H) * 0.0435,
+    angleX: 0.52,
+    angleY: 0.75,
+    angleZ: 0.12,
+    hover: false,
+    hoverBlend: 0,
+    dragging: false,
+    dragOffX: 0,
+    dragOffY: 0,
+    autoMorph: true,
+    showHud: true,
+    morphTimer: 0,
+    morphDuration: 4.5,
+    currPalette: [randomHexColor(95), randomHexColor(85), randomHexColor(65)],
+    nextPalette: [randomHexColor(95), randomHexColor(85), randomHexColor(65)],
+    unicodeChars: forgeUnicodeString(10),
+    unicodeTimer: 0,
+    bayerPhase: 0,
+  };
+
+  function rerollPalette() {
+    state.currPalette = getActivePalette();
+    state.nextPalette = [randomHexColor(95), randomHexColor(85), randomHexColor(65)];
+    state.morphTimer = 0;
+  }
+
+  function getActivePalette() {
+    const t = state.autoMorph
+      ? Math.min(1, state.morphTimer / state.morphDuration)
+      : 0;
+    const ease = t * t * (3 - 2 * t);
+    return [
+      lerpColor(state.currPalette[0], state.nextPalette[0], ease),
+      lerpColor(state.currPalette[1], state.nextPalette[1], ease),
+      lerpColor(state.currPalette[2], state.nextPalette[2], ease),
+    ];
+  }
+
+  // Interaction
+  canvas.addEventListener("mousemove", (e) => {
+    if (state.dragging) {
+      state.cx = e.clientX - state.dragOffX;
+      state.cy = e.clientY - state.dragOffY;
+    }
+    const dx = e.clientX - state.cx;
+    const dy = e.clientY - state.cy;
+    const hitRadius = state.scale * 1.95;
+    const nowHover = dx * dx + dy * dy <= hitRadius * hitRadius;
+    if (nowHover && !state.hover) {
+      state.unicodeChars = forgeUnicodeString(10);
+      state.unicodeTimer = 0;
+    }
+    state.hover = nowHover;
+  });
+
+  canvas.addEventListener("mousedown", (e) => {
+    if (e.button === 0) {
+      const dx = e.clientX - state.cx;
+      const dy = e.clientY - state.cy;
+      if (dx * dx + dy * dy <= (state.scale * 2.3) ** 2) {
+        state.dragging = true;
+        state.dragOffX = dx;
+        state.dragOffY = dy;
+      }
+    } else if (e.button === 1) {
+      e.preventDefault();
+      rerollPalette();
+    }
+  });
+
+  window.addEventListener("mouseup", () => {
+    state.dragging = false;
+  });
+
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.08 : 0.92;
+    state.scale = Math.max(16, Math.min(Math.min(W, H) * 0.14, state.scale * factor));
+  }, { passive: false });
+
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Space" || e.key === "r" || e.key === "R") {
+      rerollPalette();
+    } else if (e.key === "m" || e.key === "M") {
+      state.autoMorph = !state.autoMorph;
+    } else if (e.key === "h" || e.key === "H") {
+      state.showHud = !state.showHud;
+    }
+  });
+
+  // 3D Math
+  function makeRotMatrix(ax, ay, az) {
+    const cx = Math.cos(ax), sx = Math.sin(ax);
+    const cy = Math.cos(ay), sy = Math.sin(ay);
+    const cz = Math.cos(az), sz = Math.sin(az);
+    return [
+      cy * cz,
+      sx * sy * cz - cx * sz,
+      cx * sy * cz + sx * sz,
+      cy * sz,
+      sx * sy * sz + cx * cz,
+      cx * sy * sz - sx * cz,
+      -sy,
+      sx * cy,
+      cx * cy,
+    ];
+  }
+
+  function applyMat(m, x, y, z) {
+    return [
+      m[0] * x + m[1] * y + m[2] * z,
+      m[3] * x + m[4] * y + m[5] * z,
+      m[6] * x + m[7] * y + m[8] * z,
+    ];
+  }
+
+  function project(x, y, z, cx, cy, scale) {
+    const fov = 4.6;
+    const f = fov / (fov + z);
+    return [cx + x * scale * f, cy + y * scale * f, z];
+  }
+
+  function mapUV(quad, u, v) {
+    const a = (u + 1) * 0.5;
+    const b = (v + 1) * 0.5;
+    const [p0, p1, p2, p3] = quad;
+    const w0 = (1 - a) * (1 - b);
+    const w1 = a * (1 - b);
+    const w2 = a * b;
+    const w3 = (1 - a) * b;
+    return [
+      w0 * p0[0] + w1 * p1[0] + w2 * p2[0] + w3 * p3[0],
+      w0 * p0[1] + w1 * p1[1] + w2 * p2[1] + w3 * p3[1],
+    ];
+  }
+
+  function poly(pts, fill, stroke, lineWidth = 1) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    if (fill) {
+      ctx.fillStyle = fill;
+      ctx.fill();
+    }
+    if (stroke) {
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = lineWidth;
+      ctx.stroke();
+    }
+  }
+
+  const BAYER_4X4 = [
+    [ 0,  8,  2, 10],
+    [12,  4, 14,  6],
+    [ 3, 11,  1,  9],
+    [15,  7, 13,  5],
+  ];
+
+  // Cube topology
+  const CUBE_VERTS = [
+    [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+    [-1, -1,  1], [1, -1,  1], [1, 1,  1], [-1, 1,  1],
+  ];
+
+  const CUBE_FACES = [
+    { idx: [0, 1, 2, 3], norm: [0, 0, -1] },
+    { idx: [5, 4, 7, 6], norm: [0, 0,  1] },
+    { idx: [4, 0, 3, 7], norm: [-1, 0, 0] },
+    { idx: [1, 5, 6, 2], norm: [ 1, 0, 0] },
+    { idx: [4, 5, 1, 0], norm: [0, -1, 0] },
+    { idx: [3, 2, 6, 7], norm: [0,  1, 0] },
+  ];
+
+  const OCTA_VERTS = [
+    [0, -0.78, 0], [0, 0.78, 0],
+    [-0.78, 0, 0], [0.78, 0, 0],
+    [0, 0, -0.78], [0, 0, 0.78],
+  ];
+  const OCTA_EDGES = [
+    [0,2],[0,3],[0,4],[0,5],
+    [1,2],[1,3],[1,4],[1,5],
+    [2,4],[4,3],[3,5],[5,2],
+  ];
+
+  // Cosmic dust particles
+  const dust = Array.from({ length: 48 }, () => ({
+    angle: Math.random() * Math.PI * 2,
+    dist: 1.45 + Math.random() * 1.45,
+    yOff: (Math.random() - 0.5) * 2.2,
+    speed: (Math.random() * 0.35 + 0.12) * (Math.random() < 0.5 ? 1 : -1),
+    size: 0.75 + Math.random() * 1.1,
+    phase: Math.random() * Math.PI * 2,
+  }));
+
+  function drawFace(quad, shade, pal, time, hoverBlend) {
+    const [cPrimary, cAccent, cDeep] = pal;
+    const base = (16 + shade * 18) | 0;
+    const plateFill = `rgb(${base}, ${base + 4}, ${base + 10})`;
+
+    // Chamfered outer octagonal plate
+    const ch = 0.84;
+    const octOuter = [
+      mapUV(quad, -ch, -1), mapUV(quad, ch, -1),
+      mapUV(quad, 1, -ch),  mapUV(quad, 1, ch),
+      mapUV(quad, ch, 1),   mapUV(quad, -ch, 1),
+      mapUV(quad, -1, ch),  mapUV(quad, -1, -ch),
+    ];
+    poly(octOuter, plateFill, rgbStr(cAccent, 0.55 + shade * 0.35), 1.1);
+
+    // Recessed inner bay
+    const octInner = [
+      mapUV(quad, -0.66, -0.78), mapUV(quad, 0.66, -0.78),
+      mapUV(quad, 0.78, -0.66),  mapUV(quad, 0.78, 0.66),
+      mapUV(quad, 0.66, 0.78),   mapUV(quad, -0.66, 0.78),
+      mapUV(quad, -0.78, 0.66),  mapUV(quad, -0.78, -0.66),
+    ];
+    poly(octInner, "rgba(8, 12, 18, 0.92)", rgbStr(cPrimary, 0.45), 0.9);
+
+    // Micro-circuit traces
+    ctx.strokeStyle = rgbStr(cAccent, 0.32 + shade * 0.25);
+    ctx.lineWidth = 0.75;
+    const traces = [
+      [[-0.78, -0.35], [-0.52, -0.35], [-0.42, -0.25]],
+      [[ 0.78,  0.35], [ 0.52,  0.35], [ 0.42,  0.25]],
+      [[-0.35,  0.78], [-0.35,  0.52], [-0.25,  0.42]],
+      [[ 0.35, -0.78], [ 0.35, -0.52], [ 0.25, -0.42]],
+    ];
+    for (const tr of traces) {
+      ctx.beginPath();
+      tr.forEach(([u, v], idx) => {
+        const [px, py] = mapUV(quad, u, v);
+        if (idx === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      });
+      ctx.stroke();
+    }
+
+    // Counter-rotating cyber reticle
+    const rotA = time * 0.9;
+    const rotB = -time * 1.35;
+    const r1 = 0.52;
+    const ret1 = [];
+    for (let i = 0; i < 4; i++) {
+      const a = rotA + (i * Math.PI) / 2;
+      ret1.push(mapUV(quad, Math.cos(a) * r1, Math.sin(a) * r1));
+    }
+    poly(ret1, null, rgbStr(cPrimary, 0.75), 0.95);
+
+    const r2 = 0.36;
+    const ret2 = [];
+    for (let i = 0; i < 4; i++) {
+      const a = rotB + (i * Math.PI) / 2 + Math.PI / 4;
+      ret2.push(mapUV(quad, Math.cos(a) * r2, Math.sin(a) * r2));
+    }
+    poly(ret2, rgbStr(cDeep, 0.22), rgbStr(cAccent, 0.8), 0.9);
+
+    // Central glowing cyber aperture
+    const pulse = 0.88 + 0.12 * Math.sin(time * 4.2);
+    const eye = [
+      mapUV(quad, -0.26 * pulse, 0),
+      mapUV(quad, 0, -0.15 * pulse),
+      mapUV(quad, 0.26 * pulse, 0),
+      mapUV(quad, 0, 0.15 * pulse),
+    ];
+    poly(eye, rgbStr(cPrimary, 0.35 + hoverBlend * 0.3), rgbStr(cPrimary, 0.95), 1.0);
+
+    const core = [
+      mapUV(quad, -0.06, 0),
+      mapUV(quad, 0, -0.10),
+      mapUV(quad, 0.06, 0),
+      mapUV(quad, 0, 0.10),
+    ];
+    poly(core, "#FFFFFF", rgbStr(cPrimary, 1), 0.75);
+  }
+
+  function drawRings(frontHalf, rotMat, cx, cy, scale, pal, time, hoverBlend) {
+    const [cPrimary, cAccent] = pal;
+    const ringSpecs = [
+      { r: 1.56 + hoverBlend * 0.22, tx: 0.48, tz: 0.32, spd: 0.55, col: cPrimary, segs: 48 },
+      { r: 1.76 + hoverBlend * 0.30, tx: -0.62, tz: -0.25, spd: -0.42, col: cAccent, segs: 56 },
+      { r: 1.94 + hoverBlend * 0.38, tx: 1.05, tz: 0.14, spd: 0.28, col: cPrimary, segs: 40 },
+    ];
+
+    for (const ring of ringSpecs) {
+      const pts = [];
+      for (let i = 0; i < ring.segs; i++) {
+        const th = (i / ring.segs) * Math.PI * 2 + time * ring.spd;
+        let x = Math.cos(th) * ring.r;
+        let y = 0;
+        let z = Math.sin(th) * ring.r;
+
+        // Ring tilt
+        const ctX = Math.cos(ring.tx), stX = Math.sin(ring.tx);
+        [y, z] = [y * ctX - z * stX, y * stX + z * ctX];
+        const ctZ = Math.cos(ring.tz), stZ = Math.sin(ring.tz);
+        [x, y] = [x * ctZ - y * stZ, x * stZ + y * ctZ];
+
+        const [sx, sy, sz] = project(x, y, z, cx, cy, scale);
+        pts.push({ sx, sy, sz, i });
+      }
+
+      for (let i = 0; i < ring.segs; i++) {
+        const p1 = pts[i];
+        const p2 = pts[(i + 1) % ring.segs];
+        const avgZ = (p1.sz + p2.sz) * 0.5;
+        const isFront = avgZ < 0;
+        if (isFront !== frontHalf) continue;
+
+        if (i % 3 !== 0) {
+          ctx.beginPath();
+          ctx.moveTo(p1.sx, p1.sy);
+          ctx.lineTo(p2.sx, p2.sy);
+          ctx.strokeStyle = rgbStr(ring.col, isFront ? 0.85 : 0.28);
+          ctx.lineWidth = isFront ? 1.2 : 0.75;
+          ctx.stroke();
+        }
+        if (i % 8 === 0) {
+          ctx.beginPath();
+          ctx.arc(p1.sx, p1.sy, isFront ? 1.7 : 1.0, 0, Math.PI * 2);
+          ctx.fillStyle = isFront ? "#FFFFFF" : rgbStr(ring.col, 0.5);
+          ctx.fill();
+        }
+      }
+    }
+  }
+
+  // Holographic jittering dither post-process supporting transparent alpha
+  function applyHolographicDither(cx, cy, radius, intensity, time, pal) {
+    if (intensity <= 0.01) return;
+
+    const pad = Math.ceil(radius * 1.6 + 80);
+    const x0 = Math.max(0, Math.floor((cx - pad) * dpr));
+    const y0 = Math.max(0, Math.floor((cy - pad * 1.45) * dpr));
+    const x1 = Math.min(canvas.width, Math.ceil((cx + pad) * dpr));
+    const y1 = Math.min(canvas.height, Math.ceil((cy + pad * 1.25) * dpr));
+    const bw = x1 - x0;
+    const bh = y1 - y0;
+    if (bw <= 4 || bh <= 4) return;
+
+    const imgData = ctx.getImageData(x0, y0, bw, bh);
+    const data = imgData.data;
+
+    const jitterPhase = ((time * 48) | 0);
+    const glitchBandY = ((Math.sin(time * 29.7) * 0.5 + 0.5) * bh) | 0;
+    const glitchBandH = Math.max(3, (10 * dpr * intensity) | 0);
+    const sliceShift = (Math.sin(time * 67.3) * 6 * dpr * intensity) | 0;
+    const chromaShift = Math.max(1, Math.round((1.5 + 2.2 * Math.abs(Math.sin(time * 23))) * dpr * intensity));
+
+    const src = new Uint8ClampedArray(data);
+
+    for (let y = 0; y < bh; y++) {
+      const inGlitchBand = Math.abs(y - glitchBandY) < glitchBandH;
+      const lineJitter = inGlitchBand
+        ? sliceShift
+        : (((Math.sin(y * 0.45 + jitterPhase * 1.7) > 0.88) ? (Math.cos(jitterPhase + y) * 3 * dpr * intensity) : 0) | 0);
+
+      const scanlineMod = (y % 3 === 0) ? (1.0 - 0.24 * intensity) : (1.0 + 0.08 * intensity);
+
+      for (let x = 0; x < bw; x++) {
+        const idx = (y * bw + x) * 4;
+
+        const xr = Math.min(bw - 1, Math.max(0, x + lineJitter + chromaShift));
+        const xg = Math.min(bw - 1, Math.max(0, x + lineJitter));
+        const xb = Math.min(bw - 1, Math.max(0, x + lineJitter - chromaShift));
+
+        const ir = (y * bw + xr) * 4;
+        const ig = (y * bw + xg) * 4;
+        const ib = (y * bw + xb) * 4;
+
+        const ar = src[ir + 3];
+        const ag = src[ig + 3];
+        const ab = src[ib + 3];
+        const alphaMax = ar > ag ? (ar > ab ? ar : ab) : (ag > ab ? ag : ab);
+
+        // Skip fully transparent pixels outside the cube & hologram
+        if (alphaMax < 8) {
+          data[idx + 3] = 0;
+          continue;
+        }
+
+        let r = src[ir];
+        let g = src[ig + 1];
+        let b = src[ib + 2];
+
+        const bx = (x + (jitterPhase & 3)) & 3;
+        const by = (y + ((jitterPhase >> 1) & 3)) & 3;
+        const bayerVal = (BAYER_4X4[by][bx] / 16.0 - 0.5) * 68 * intensity;
+
+        const holoWave = Math.sin(y * 0.14 - time * 18) * 0.5 + 0.5;
+        r = r * scanlineMod + bayerVal + holoWave * 14 * intensity;
+        g = g * scanlineMod + bayerVal + (1 - holoWave) * 18 * intensity;
+        b = b * scanlineMod + bayerVal + 24 * intensity;
+
+        data[idx]     = r < 0 ? 0 : (r > 255 ? 255 : r);
+        data[idx + 1] = g < 0 ? 0 : (g > 255 ? 255 : g);
+        data[idx + 2] = b < 0 ? 0 : (b > 255 ? 255 : b);
+        data[idx + 3] = alphaMax;
+      }
+    }
+
+    ctx.putImageData(imgData, x0, y0);
+
+    // Holographic interference scan bars
+    ctx.save();
+    const [cPrimary, cAccent] = pal;
+    for (let i = 0; i < 4; i++) {
+      const barY = cy - radius * 1.15 + (((time * 100 + i * 45) % (radius * 2.2)));
+      const jx = (Math.random() - 0.5) * 8 * intensity;
+      ctx.fillStyle = i % 2 === 0 ? rgbStr(cPrimary, 0.22 * intensity) : rgbStr(cAccent, 0.18 * intensity);
+      ctx.fillRect(cx - radius * 1.05 + jx, barY, radius * 2.1, 1.1);
+    }
+    ctx.restore();
+  }
+
+  function drawUnicodeBubble(cx, cy, scale, pal, hoverBlend, time) {
+    if (hoverBlend <= 0.02) return;
+
+    const [cPrimary, cAccent] = pal;
+    const bw = Math.max(176, scale * 2.5);
+    const bh = 30;
+
+    const anchorX = Math.max(bw * 0.5 + 12, Math.min(W - bw * 0.5 - 12, cx));
+    const anchorY = Math.max(bh * 0.5 + 12, cy - scale * (1.88 + hoverBlend * 0.22) - 22);
+
+    const jx = (Math.random() - 0.5) * 2.2 * hoverBlend;
+    const jy = (Math.random() - 0.5) * 1.5 * hoverBlend;
+    const bx = anchorX - bw * 0.5 + jx;
+    const by = anchorY - bh * 0.5 + jy;
+    const ch = 7;
+
+    ctx.save();
+    ctx.globalAlpha = hoverBlend;
+
+    // Connector telemetry stem
+    ctx.beginPath();
+    ctx.moveTo(anchorX, by + bh);
+    ctx.lineTo(anchorX, by + bh + 9);
+    ctx.strokeStyle = rgbStr(cPrimary, 0.75);
+    ctx.lineWidth = 1.1;
+    ctx.stroke();
+
+    // Chamfered holographic bubble frame
+    const frame = [
+      [bx + ch, by],
+      [bx + bw - ch, by],
+      [bx + bw, by + ch],
+      [bx + bw, by + bh - ch],
+      [bx + bw - ch, by + bh],
+      [bx + ch, by + bh],
+      [bx, by + bh - ch],
+      [bx, by + ch],
+    ];
+    poly(frame, "rgba(6, 11, 18, 0.88)", rgbStr(cPrimary, 0.9), 1.2);
+
+    // Animated Bayer stipple dither fill
+    const step = 3;
+    const phaseShift = ((time * 24) | 0) % 4;
+    ctx.fillStyle = rgbStr(cAccent, 0.16);
+    for (let py = by + 3; py < by + bh - 3; py += step) {
+      const row = (((py - by) / step) | 0) + phaseShift;
+      for (let px = bx + 4 + (row & 1) * 1.5; px < bx + bw - 4; px += step) {
+        ctx.fillRect(px, py, 1.1, 1.1);
+      }
+    }
+
+    // 10 per-glyph slots
+    const slotW = (bw - 16) / 10;
+    ctx.font = '600 12px "Segoe UI", "Malgun Gothic", "Microsoft YaHei", "Tahoma", sans-serif';
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    for (let i = 0; i < 10; i++) {
+      const gx = bx + 8 + slotW * (i + 0.5);
+      const gy = anchorY + jy + Math.sin(time * 16 + i * 0.9) * 0.8;
+
+      ctx.fillStyle = rgbStr(cAccent, 0.55);
+      ctx.fillText(state.unicodeChars[i], gx + (Math.random() - 0.5) * 2.4, gy);
+
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillText(state.unicodeChars[i], gx, gy);
+    }
+
+    ctx.restore();
+  }
+
+  function drawHexHud(cx, cy, scale, pal) {
+    if (!state.showHud) return;
+    const pillW = 216;
+    const pillH = 20;
+    const px = Math.max(10, Math.min(W - pillW - 10, cx - pillW * 0.5));
+    const py = Math.min(H - pillH - 10, cy + scale * 1.98 + 14);
+
+    ctx.save();
+    ctx.fillStyle = "rgba(8, 12, 18, 0.78)";
+    ctx.strokeStyle = rgbStr(pal[0], 0.45);
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    ctx.roundRect(px, py, pillW, pillH, 10);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = '600 9px "Consolas", "Segoe UI", monospace';
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const modeTag = state.autoMorph ? "AUTO" : "LOCK";
+    const label = `${hexStr(pal[0])} · ${hexStr(pal[1])} · ${hexStr(pal[2])}  [${modeTag}]`;
+    ctx.fillStyle = "#DCE6F2";
+    ctx.fillText(label, px + pillW * 0.5, py + pillH * 0.5 + 0.5);
+    ctx.restore();
+  }
+
+  let lastTime = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.05, (now - lastTime) * 0.001);
+    lastTime = now;
+    const time = now * 0.001;
+
+    // Color morphing
+    if (state.autoMorph) {
+      state.morphTimer += dt;
+      if (state.morphTimer >= state.morphDuration) {
+        state.currPalette = state.nextPalette;
+        state.nextPalette = [randomHexColor(95), randomHexColor(85), randomHexColor(65)];
+        state.morphTimer = 0;
+      }
+    }
+    const pal = getActivePalette();
+
+    // Smooth hover transition
+    const targetHover = state.hover ? 1 : 0;
+    state.hoverBlend += (targetHover - state.hoverBlend) * Math.min(1, dt * 11);
+
+    // Cycle random 10-character Unicode cipher while hovering
+    if (state.hover) {
+      state.unicodeTimer += dt;
+      if (state.unicodeTimer >= 0.14) {
+        state.unicodeTimer = 0;
+        for (let k = 0; k < 4; k++) {
+          const idx = (Math.random() * 10) | 0;
+          state.unicodeChars[idx] = forgeUnicodeString(1)[0];
+        }
+      }
+    }
+
+    // Clear to full transparency
+    ctx.clearRect(0, 0, W, H);
+
+    // Subtle radial energy aura behind cube (fades to transparent)
+    const aura = ctx.createRadialGradient(
+      state.cx, state.cy, state.scale * 0.2,
+      state.cx, state.cy, state.scale * 2.4
+    );
+    aura.addColorStop(0, rgbStr(pal[0], 0.16 + state.hoverBlend * 0.14));
+    aura.addColorStop(0.55, rgbStr(pal[1], 0.05));
+    aura.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = aura;
+    ctx.beginPath();
+    ctx.arc(state.cx, state.cy, state.scale * 2.4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Cosmic dust particles
+    for (const p of dust) {
+      p.angle += p.speed * dt;
+      const dx = Math.cos(p.angle) * p.dist;
+      const dz = Math.sin(p.angle) * p.dist;
+      const [sx, sy, sz] = project(dx, p.yOff, dz, state.cx, state.cy, state.scale);
+      const alpha = (0.25 + 0.35 * Math.sin(time * 2.4 + p.phase)) * (sz < 0 ? 1 : 0.45);
+      ctx.fillStyle = rgbStr(sz < 0 ? pal[0] : pal[1], alpha);
+      ctx.fillRect(sx, sy, p.size, p.size);
+    }
+
+    // Back orbital rings
+    const rotMat = makeRotMatrix(state.angleX, state.angleY, state.angleZ);
+    drawRings(false, rotMat, state.cx, state.cy, state.scale, pal, time, state.hoverBlend);
+
+    // Inner wireframe octahedron core
+    if (state.hoverBlend > 0.02) {
+      const coreMat = makeRotMatrix(-state.angleX * 1.6, state.angleY * 2.1, time * 0.9);
+      const coreScale = state.scale * (0.55 + state.hoverBlend * 0.35);
+      const projCore = OCTA_VERTS.map((v) => {
+        const rv = applyMat(coreMat, v[0], v[1], v[2]);
+        return project(rv[0], rv[1], rv[2], state.cx, state.cy, coreScale);
+      });
+
+      ctx.save();
+      ctx.strokeStyle = rgbStr(pal[0], 0.85 * state.hoverBlend);
+      ctx.lineWidth = 1.1;
+      for (const [a, b] of OCTA_EDGES) {
+        ctx.beginPath();
+        ctx.moveTo(projCore[a][0], projCore[a][1]);
+        ctx.lineTo(projCore[b][0], projCore[b][1]);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // Cube plates sorted back-to-front with hover radial expansion
+    const explode = state.hoverBlend * 0.36;
+    const faceDrawList = [];
+
+    for (const face of CUBE_FACES) {
+      const [nx, ny, nz] = applyMat(rotMat, face.norm[0], face.norm[1], face.norm[2]);
+      if (nz >= 0.18) continue;
+
+      const offset = [
+        face.norm[0] * explode,
+        face.norm[1] * explode,
+        face.norm[2] * explode,
+      ];
+
+      let avgZ = 0;
+      const quad = face.idx.map((vi) => {
+        const v = CUBE_VERTS[vi];
+        const rv = applyMat(rotMat, v[0] + offset[0], v[1] + offset[1], v[2] + offset[2]);
+        avgZ += rv[2];
+        return project(rv[0], rv[1], rv[2], state.cx, state.cy, state.scale);
+      });
+      avgZ *= 0.25;
+      const shade = Math.max(0.2, Math.min(1, 0.55 - nz * 0.55));
+      faceDrawList.push({ avgZ, quad, shade });
+    }
+
+    faceDrawList.sort((a, b) => b.avgZ - a.avgZ);
+    for (const f of faceDrawList) {
+      drawFace(f.quad, f.shade, pal, time, state.hoverBlend);
+    }
+
+    // Front orbital rings
+    drawRings(true, rotMat, state.cx, state.cy, state.scale, pal, time, state.hoverBlend);
+
+    // Hover Unicode cipher bubble
+    drawUnicodeBubble(state.cx, state.cy, state.scale, pal, state.hoverBlend, time);
+
+    // Pixel-level holographic jittering dither pass when hovering
+    if (state.hoverBlend > 0.01) {
+      applyHolographicDither(state.cx, state.cy, state.scale * 2.15, state.hoverBlend, time, pal);
+    }
+
+    // Hex readout pill
+    drawHexHud(state.cx, state.cy, state.scale, pal);
+
+    // Rotation update
+    state.angleY += dt * (0.72 + state.hoverBlend * 0.45);
+    state.angleX = 0.52 + Math.sin(time * 0.65) * 0.14;
+
+    requestAnimationFrame(loop);
+  }
+
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

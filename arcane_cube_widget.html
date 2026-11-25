@@ -1,0 +1,738 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Arcane Cyber Cube Widget</title>
+<style>
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+  }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: radial-gradient(circle at 50% 45%, #0c111a 0%, #05070b 70%, #020305 100%);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+  #controls-hint {
+    position: fixed;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(190, 205, 225, 0.55);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    pointer-events: none;
+    text-align: center;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="controls-hint">
+  HOVER: EXPAND + UNICODE CIPHER &nbsp;|&nbsp; DRAG: MOVE &nbsp;|&nbsp; SCROLL: SCALE &nbsp;|&nbsp; SPACE / R / MIDDLE-CLICK: REROLL HEX &nbsp;|&nbsp; M: LOCK COLOR &nbsp;|&nbsp; H: TOGGLE HUD
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("scene");
+  const ctx = canvas.getContext("2d");
+
+  let width = window.innerWidth;
+  let height = window.innerHeight;
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+  function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // --- Windows 10 Visible BMP Unicode Ranges ---
+  const UNICODE_RANGES = [
+    [0x0041, 0x005A], // Latin Upper
+    [0x0061, 0x007A], // Latin Lower
+    [0x00C0, 0x00D6], // Latin-1 Supplement
+    [0x00D8, 0x00F6],
+    [0x0391, 0x03A1], // Greek
+    [0x03A3, 0x03A9],
+    [0x03B1, 0x03C9],
+    [0x0410, 0x044F], // Cyrillic
+    [0x0531, 0x0556], // Armenian
+    [0x05D0, 0x05EA], // Hebrew
+    [0x0627, 0x064A], // Arabic (isolated/base visible letters)
+    [0x0905, 0x0939], // Devanagari
+    [0x0E01, 0x0E2E], // Thai
+    [0x10D0, 0x10F0], // Georgian
+    [0x3042, 0x3093], // Japanese Hiragana
+    [0x30A2, 0x30F3], // Japanese Katakana
+    [0xAC00, 0xD7A3], // Korean Hangul Syllables
+    [0x4E00, 0x9FFF], // CJK Unified Ideographs
+  ];
+
+  function forgeUnicodeChars(len = 10) {
+    const out = [];
+    for (let i = 0; i < len; i++) {
+      const [lo, hi] = UNICODE_RANGES[Math.floor(Math.random() * UNICODE_RANGES.length)];
+      const code = lo + Math.floor(Math.random() * (hi - lo + 1));
+      out.push(String.fromCharCode(code));
+    }
+    return out;
+  }
+
+  // --- Hex Color Utilities ---
+  function randomHexColor() {
+    let r = Math.floor(Math.random() * 256);
+    let g = Math.floor(Math.random() * 256);
+    let b = Math.floor(Math.random() * 256);
+    if (r < 8 && g < 8 && b < 8) r = 18;
+    return [r, g, b];
+  }
+
+  function rgbToHex([r, g, b]) {
+    const toH = (v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0").toUpperCase();
+    return `#${toH(r)}${toH(g)}${toH(b)}`;
+  }
+
+  function rgba([r, g, b], a = 1) {
+    return `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${a})`;
+  }
+
+  function lerpRgb(c1, c2, t) {
+    return [
+      c1[0] + (c2[0] - c1[0]) * t,
+      c1[1] + (c2[1] - c1[1]) * t,
+      c1[2] + (c2[2] - c1[2]) * t,
+    ];
+  }
+
+  function scaleRgb([r, g, b], f) {
+    return [
+      Math.max(0, Math.min(255, r * f)),
+      Math.max(0, Math.min(255, g * f)),
+      Math.max(0, Math.min(255, b * f)),
+    ];
+  }
+
+  function makePalette() {
+    return {
+      primary: randomHexColor(),
+      secondary: randomHexColor(),
+      accent: randomHexColor(),
+      plate: scaleRgb(randomHexColor(), 0.26),
+    };
+  }
+
+  let curPal = makePalette();
+  let nextPal = makePalette();
+  let colorMorph = 0.0;
+  let autoMorph = true;
+  let showHud = true;
+
+  function triggerReroll() {
+    curPal = getBlendedPalette();
+    nextPal = makePalette();
+    colorMorph = 0.0;
+  }
+
+  function getBlendedPalette() {
+    const t = colorMorph * colorMorph * (3 - 2 * colorMorph);
+    return {
+      primary: lerpRgb(curPal.primary, nextPal.primary, t),
+      secondary: lerpRgb(curPal.secondary, nextPal.secondary, t),
+      accent: lerpRgb(curPal.accent, nextPal.accent, t),
+      plate: lerpRgb(curPal.plate, nextPal.plate, t),
+    };
+  }
+
+  // --- Cube State & Interaction ---
+  const state = {
+    cx: width * 0.5,
+    cy: height * 0.52,
+    scale: Math.min(width, height) * 0.145,
+    angleX: 0.52,
+    angleY: 0.78,
+    angleZ: 0.14,
+    hover: false,
+    expand: 0.0,
+    dragging: false,
+    dragOffX: 0,
+    dragOffY: 0,
+    mouseX: -9999,
+    mouseY: -9999,
+    unicodeChars: forgeUnicodeChars(10),
+    unicodeTimer: 0,
+    bubbleVisible: 0,
+  };
+
+  window.addEventListener("mousemove", (e) => {
+    state.mouseX = e.clientX;
+    state.mouseY = e.clientY;
+    if (state.dragging) {
+      state.cx = e.clientX - state.dragOffX;
+      state.cy = e.clientY - state.dragOffY;
+    }
+  });
+
+  window.addEventListener("mousedown", (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      triggerReroll();
+      return;
+    }
+    if (e.button === 0) {
+      const dist = Math.hypot(e.clientX - state.cx, e.clientY - state.cy);
+      if (dist <= state.scale * 1.95) {
+        state.dragging = true;
+        state.dragOffX = e.clientX - state.cx;
+        state.dragOffY = e.clientY - state.cy;
+      }
+    }
+  });
+
+  window.addEventListener("mouseup", () => {
+    state.dragging = false;
+  });
+
+  window.addEventListener("wheel", (e) => {
+    const factor = e.deltaY < 0 ? 1.08 : 0.92;
+    state.scale = Math.max(48, Math.min(Math.min(width, height) * 0.34, state.scale * factor));
+  }, { passive: true });
+
+  window.addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    if (k === " " || k === "r") {
+      e.preventDefault();
+      triggerReroll();
+    } else if (k === "m") {
+      autoMorph = !autoMorph;
+    } else if (k === "h") {
+      showHud = !showHud;
+      document.getElementById("controls-hint").style.opacity = showHud ? "1" : "0";
+    }
+  });
+
+  // --- 3D Math ---
+  function buildRotMatrix(ax, ay, az) {
+    const cx = Math.cos(ax), sx = Math.sin(ax);
+    const cy = Math.cos(ay), sy = Math.sin(ay);
+    const cz = Math.cos(az), sz = Math.sin(az);
+    return [
+      [cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz],
+      [cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz],
+      [-sy, sx * cy, cx * cy],
+    ];
+  }
+
+  function mulMat(m, x, y, z) {
+    return [
+      m[0][0] * x + m[0][1] * y + m[0][2] * z,
+      m[1][0] * x + m[1][1] * y + m[1][2] * z,
+      m[2][0] * x + m[2][1] * y + m[2][2] * z,
+    ];
+  }
+
+  function project(x, y, z) {
+    const fov = 4.6;
+    const f = fov / (fov + z);
+    return [
+      state.cx + x * state.scale * f,
+      state.cy + y * state.scale * f,
+      z,
+    ];
+  }
+
+  function mapUV(quad, u, v) {
+    const a = (u + 1) * 0.5;
+    const b = (v + 1) * 0.5;
+    const [p0, p1, p2, p3] = quad;
+    return [
+      (1 - a) * (1 - b) * p0[0] + a * (1 - b) * p1[0] + a * b * p2[0] + (1 - a) * b * p3[0],
+      (1 - a) * (1 - b) * p0[1] + a * (1 - b) * p1[1] + a * b * p2[1] + (1 - a) * b * p3[1],
+    ];
+  }
+
+  function polyPath(pts) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) {
+      ctx.lineTo(pts[i][0], pts[i][1]);
+    }
+    ctx.closePath();
+  }
+
+  // --- Face Definitions ---
+  const FACE_DEFS = [
+    { normal: [0, 0, -1], verts: [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1]] },
+    { normal: [0, 0, 1],  verts: [[1, -1, 1], [-1, -1, 1], [-1, 1, 1], [1, 1, 1]] },
+    { normal: [-1, 0, 0], verts: [[-1, -1, 1], [-1, -1, -1], [-1, 1, -1], [-1, 1, 1]] },
+    { normal: [1, 0, 0],  verts: [[1, -1, -1], [1, -1, 1], [1, 1, 1], [1, 1, -1]] },
+    { normal: [0, -1, 0], verts: [[-1, -1, 1], [1, -1, 1], [1, -1, -1], [-1, -1, -1]] },
+    { normal: [0, 1, 0],  verts: [[-1, 1, -1], [1, 1, -1], [1, 1, 1], [-1, 1, 1]] },
+  ];
+
+  // Ambient floating particles
+  const dust = Array.from({ length: 42 }, () => ({
+    angle: Math.random() * Math.PI * 2,
+    radius: 1.55 + Math.random() * 0.85,
+    yOff: (Math.random() - 0.5) * 2.2,
+    speed: (0.2 + Math.random() * 0.45) * (Math.random() < 0.5 ? 1 : -1),
+    size: 1.1 + Math.random() * 2.0,
+    phase: Math.random() * Math.PI * 2,
+  }));
+
+  function drawModernFace(quad, shade, pal, time) {
+    const plateFill = scaleRgb(pal.plate, 0.65 + shade * 0.75);
+    const edgeCol = scaleRgb(pal.secondary, 0.55 + shade * 0.55);
+    const glowCol = scaleRgb(pal.primary, 0.65 + shade * 0.55);
+    const coreCol = scaleRgb(pal.accent, 0.75 + shade * 0.45);
+
+    // 1. Chamfered octagonal outer plate
+    const c = 0.84;
+    const oct = [
+      mapUV(quad, -c, -1), mapUV(quad, c, -1),
+      mapUV(quad, 1, -c),  mapUV(quad, 1, c),
+      mapUV(quad, c, 1),   mapUV(quad, -c, 1),
+      mapUV(quad, -1, c),  mapUV(quad, -1, -c),
+    ];
+    polyPath(oct);
+    ctx.fillStyle = rgba(plateFill, 0.96);
+    ctx.fill();
+    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = rgba(edgeCol, 0.9);
+    ctx.stroke();
+
+    // 2. Inner recessed cyber bay
+    const bay = [
+      mapUV(quad, -0.74, -0.74),
+      mapUV(quad, 0.74, -0.74),
+      mapUV(quad, 0.74, 0.74),
+      mapUV(quad, -0.74, 0.74),
+    ];
+    polyPath(bay);
+    ctx.fillStyle = "rgba(6, 9, 15, 0.78)";
+    ctx.fill();
+    ctx.lineWidth = 1.1;
+    ctx.strokeStyle = rgba(glowCol, 0.55);
+    ctx.stroke();
+
+    // 3. Corner HUD brackets + micro nodes
+    const signs = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+    ctx.strokeStyle = rgba(edgeCol, 0.95);
+    ctx.lineWidth = 1.7;
+    for (const [sx, sy] of signs) {
+      const pA = mapUV(quad, sx * 0.88, sy * 0.66);
+      const pB = mapUV(quad, sx * 0.88, sy * 0.88);
+      const pC = mapUV(quad, sx * 0.66, sy * 0.88);
+      ctx.beginPath();
+      ctx.moveTo(pA[0], pA[1]);
+      ctx.lineTo(pB[0], pB[1]);
+      ctx.lineTo(pC[0], pC[1]);
+      ctx.stroke();
+
+      const dot = mapUV(quad, sx * 0.79, sy * 0.79);
+      ctx.fillStyle = rgba(glowCol, 0.95);
+      ctx.beginPath();
+      ctx.arc(dot[0], dot[1], 1.7, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 4. Micro-circuit traces connecting bay to central reticle
+    ctx.strokeStyle = rgba(glowCol, 0.42);
+    ctx.lineWidth = 1.0;
+    const traces = [
+      [[-0.74, -0.25], [-0.46, -0.25], [-0.34, -0.14]],
+      [[0.74, 0.25],   [0.46, 0.25],   [0.34, 0.14]],
+      [[-0.25, 0.74],  [-0.25, 0.46],  [-0.14, 0.34]],
+      [[0.25, -0.74],  [0.25, -0.46],  [0.14, -0.34]],
+    ];
+    for (const tr of traces) {
+      ctx.beginPath();
+      tr.forEach(([u, v], idx) => {
+        const pt = mapUV(quad, u, v);
+        if (idx === 0) ctx.moveTo(pt[0], pt[1]);
+        else ctx.lineTo(pt[0], pt[1]);
+      });
+      ctx.stroke();
+    }
+
+    // 5. Counter-rotating geometric reticle
+    const rot1 = time * 0.8;
+    const rot2 = -time * 1.15;
+    for (const [rad, ang, col, lw] of [
+      [0.46, rot1, glowCol, 1.35],
+      [0.33, rot2, edgeCol, 1.2],
+    ]) {
+      const pts = [];
+      for (let i = 0; i < 4; i++) {
+        const a = ang + (i * Math.PI) / 2;
+        pts.push(mapUV(quad, Math.cos(a) * rad, Math.sin(a) * rad));
+      }
+      polyPath(pts);
+      ctx.strokeStyle = rgba(col, 0.88);
+      ctx.lineWidth = lw;
+      ctx.stroke();
+    }
+
+    // 6. Central pulsing cyber-eye aperture
+    const pulse = 0.85 + 0.15 * Math.sin(time * 4.2);
+    const eyePts = [
+      mapUV(quad, -0.26 * pulse, 0),
+      mapUV(quad, 0, -0.15 * pulse),
+      mapUV(quad, 0.26 * pulse, 0),
+      mapUV(quad, 0, 0.15 * pulse),
+    ];
+    polyPath(eyePts);
+    ctx.fillStyle = rgba(coreCol, 0.32);
+    ctx.fill();
+    ctx.strokeStyle = rgba(coreCol, 0.98);
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    const iris = mapUV(quad, 0, 0);
+    ctx.fillStyle = "#FFFFFF";
+    ctx.beginPath();
+    ctx.arc(iris[0], iris[1], Math.max(1.8, state.scale * 0.028 * pulse), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawGyroRings(pal, time, frontHalf) {
+    const rings = [
+      { r: 1.56, tx: 0.45, tz: 0.32, spd: 0.42, col: pal.primary, segs: 36 },
+      { r: 1.74, tx: -0.58, tz: -0.25, spd: -0.31, col: pal.secondary, segs: 44 },
+      { r: 1.92, tx: 0.18, tz: -0.66, spd: 0.22, col: pal.accent, segs: 30 },
+    ];
+
+    for (const ring of rings) {
+      const pts = [];
+      for (let i = 0; i < ring.segs; i++) {
+        const theta = (i / ring.segs) * Math.PI * 2 + time * ring.spd;
+        let x = ring.r * Math.cos(theta);
+        let y = 0;
+        let z = ring.r * Math.sin(theta);
+
+        // Tilt X
+        let y1 = y * Math.cos(ring.tx) - z * Math.sin(ring.tx);
+        let z1 = y * Math.sin(ring.tx) + z * Math.cos(ring.tx);
+        // Tilt Z
+        let x2 = x * Math.cos(ring.tz) - y1 * Math.sin(ring.tz);
+        let y2 = x * Math.sin(ring.tz) + y1 * Math.cos(ring.tz);
+
+        pts.push([...project(x2, y2, z1), i]);
+      }
+
+      for (let i = 0; i < ring.segs; i++) {
+        const p1 = pts[i];
+        const p2 = pts[(i + 1) % ring.segs];
+        const avgZ = (p1[2] + p2[2]) * 0.5;
+        const isFront = avgZ < 0;
+        if (isFront !== frontHalf) continue;
+
+        if (i % 3 !== 0) {
+          ctx.strokeStyle = rgba(ring.col, isFront ? 0.78 : 0.28);
+          ctx.lineWidth = isFront ? 1.5 : 1.0;
+          ctx.beginPath();
+          ctx.moveTo(p1[0], p1[1]);
+          ctx.lineTo(p2[0], p2[1]);
+          ctx.stroke();
+        }
+        if (i % 6 === 0) {
+          ctx.fillStyle = rgba(ring.col, isFront ? 0.95 : 0.4);
+          ctx.beginPath();
+          ctx.arc(p1[0], p1[1], isFront ? 2.4 : 1.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+  }
+
+  function drawSingularityCore(rotMat, pal, time, expand) {
+    if (expand <= 0.02) return;
+    const s = 0.46 * expand;
+    const octVerts = [
+      [0, -s, 0], [0, s, 0],
+      [-s, 0, 0], [s, 0, 0],
+      [0, 0, -s], [0, 0, s],
+    ];
+    const edges = [
+      [0, 2], [0, 3], [0, 4], [0, 5],
+      [1, 2], [1, 3], [1, 4], [1, 5],
+      [2, 4], [4, 3], [3, 5], [5, 2],
+    ];
+
+    const grad = ctx.createRadialGradient(
+      state.cx, state.cy, 2,
+      state.cx, state.cy, state.scale * 0.85 * expand
+    );
+    grad.addColorStop(0, rgba(pal.accent, 0.65 * expand));
+    grad.addColorStop(0.5, rgba(pal.primary, 0.25 * expand));
+    grad.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(state.cx, state.cy, state.scale * 0.85 * expand, 0, Math.PI * 2);
+    ctx.fill();
+
+    const proj = octVerts.map(([vx, vy, vz]) => {
+      const [rx, ry, rz] = mulMat(rotMat, vx, vy, vz);
+      return project(rx, ry, rz);
+    });
+
+    ctx.strokeStyle = rgba(pal.accent, 0.95 * expand);
+    ctx.lineWidth = 1.6;
+    for (const [a, b] of edges) {
+      ctx.beginPath();
+      ctx.moveTo(proj[a][0], proj[a][1]);
+      ctx.lineTo(proj[b][0], proj[b][1]);
+      ctx.stroke();
+    }
+  }
+
+  function drawUnicodeBubble(pal, time) {
+    if (state.bubbleVisible <= 0.01) return;
+    const alpha = state.bubbleVisible;
+
+    // Fixed anchor directly above the cube's upper orbital ring, clamped within viewport
+    const bw = 340;
+    const bh = 48;
+    const ringTopY = state.cy - state.scale * 1.98;
+    const baseX = Math.max(18, Math.min(width - bw - 18, state.cx - bw * 0.5));
+    const baseY = Math.max(18, ringTopY - bh - 16);
+
+    // Subtle high-frequency dither jitter while hovering
+    const jx = (Math.random() - 0.5) * 2.4;
+    const jy = (Math.random() - 0.5) * 2.4;
+    const bx = baseX + jx;
+    const by = baseY + jy;
+    const cut = 10;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    // Chamfered cyber-bubble polygon
+    const bubblePts = [
+      [bx + cut, by],
+      [bx + bw - cut, by],
+      [bx + bw, by + cut],
+      [bx + bw, by + bh - cut],
+      [bx + bw - cut, by + bh],
+      [bx + bw * 0.5 + 8, by + bh],
+      [bx + bw * 0.5, by + bh + 8],
+      [bx + bw * 0.5 - 8, by + bh],
+      [bx + cut, by + bh],
+      [bx, by + bh - cut],
+      [bx, by + cut],
+    ];
+
+    polyPath(bubblePts);
+    ctx.fillStyle = "rgba(8, 12, 20, 0.92)";
+    ctx.fill();
+
+    // Bayer-style alternating stipple dithering pattern inside bubble
+    ctx.save();
+    polyPath(bubblePts);
+    ctx.clip();
+    const step = 4;
+    ctx.fillStyle = rgba(pal.primary, 0.16);
+    for (let py = Math.floor(by); py < by + bh; py += step) {
+      const row = Math.floor(py / step);
+      for (let px = Math.floor(bx) + (row % 2) * 2; px < bx + bw; px += step) {
+        ctx.fillRect(px, py, 1.5, 1.5);
+      }
+    }
+    // Horizontal scanline shimmer
+    const scanY = by + ((time * 38) % bh);
+    ctx.fillStyle = rgba(pal.accent, 0.18);
+    ctx.fillRect(bx, scanY, bw, 2);
+    ctx.restore();
+
+    // Crisp glowing border
+    polyPath(bubblePts);
+    ctx.strokeStyle = rgba(pal.primary, 0.95);
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Render each of the 10 forged Unicode characters in dedicated fixed slots
+    ctx.font = '600 19px "Segoe UI", "Malgun Gothic", "Microsoft YaHei", "Tahoma", sans-serif';
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const slotW = (bw - 28) / 10;
+    for (let i = 0; i < 10; i++) {
+      const gx = bx + 14 + slotW * (i + 0.5);
+      const gy = by + bh * 0.52 + ((i % 2 === 0 ? 1 : -1) * Math.sin(time * 28 + i) * 0.6);
+      ctx.fillStyle = "rgba(0, 0, 0, 0.85)";
+      ctx.fillText(state.unicodeChars[i], gx + 1, gy + 1);
+      ctx.fillStyle = i % 3 === 0 ? rgbToHex(pal.accent) : "#FFFFFF";
+      ctx.fillText(state.unicodeChars[i], gx, gy);
+    }
+
+    ctx.restore();
+  }
+
+  function drawHexHud(pal) {
+    if (!showHud) return;
+    const hy = Math.min(height - 46, state.cy + state.scale * 2.15);
+    const hx = state.cx;
+    const label = `${rgbToHex(pal.primary)}  •  ${rgbToHex(pal.secondary)}  •  ${rgbToHex(pal.accent)}  [${autoMorph ? "AUTO" : "LOCKED"}]`;
+
+    ctx.save();
+    ctx.font = '600 11px "Consolas", "Segoe UI", monospace';
+    const tw = ctx.measureText(label).width + 26;
+    const th = 24;
+
+    ctx.fillStyle = "rgba(8, 12, 20, 0.78)";
+    ctx.strokeStyle = rgba(pal.primary, 0.55);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(hx - tw * 0.5, hy - th * 0.5, tw, th, 12);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(235, 244, 255, 0.9)";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, hx, hy + 0.5);
+    ctx.restore();
+  }
+
+  // --- Main Render Loop ---
+  let lastTime = performance.now();
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - lastTime) / 1000);
+    lastTime = now;
+    const time = now * 0.001;
+
+    // Color morphing
+    if (autoMorph) {
+      colorMorph += dt * 0.28;
+      if (colorMorph >= 1.0) {
+        curPal = nextPal;
+        nextPal = makePalette();
+        colorMorph = 0.0;
+      }
+    }
+    const pal = getBlendedPalette();
+
+    // Hover detection
+    const distToCube = Math.hypot(state.mouseX - state.cx, state.mouseY - state.cy);
+    const nowHover = distToCube <= state.scale * 1.65;
+    if (nowHover && !state.hover) {
+      state.unicodeChars = forgeUnicodeChars(10);
+      state.unicodeTimer = 0;
+    }
+    state.hover = nowHover;
+
+    // Smooth plate expansion & bubble fade
+    const targetExpand = state.hover ? 1.0 : 0.0;
+    state.expand += (targetExpand - state.expand) * Math.min(1, dt * 8.5);
+    state.bubbleVisible += (targetExpand - state.bubbleVisible) * Math.min(1, dt * 11.0);
+
+    // Cycle Unicode cipher characters periodically while hovering
+    if (state.hover) {
+      state.unicodeTimer += dt;
+      if (state.unicodeTimer >= 0.16) {
+        state.unicodeTimer = 0;
+        const fresh = forgeUnicodeChars(10);
+        for (let i = 0; i < 10; i++) {
+          if (Math.random() < 0.65) state.unicodeChars[i] = fresh[i];
+        }
+      }
+    }
+
+    // Rotate cube
+    state.angleY += dt * (0.65 + state.expand * 0.45);
+    state.angleX = 0.50 + 0.12 * Math.sin(time * 0.9);
+    state.angleZ = 0.12 * Math.cos(time * 0.7);
+
+    ctx.clearRect(0, 0, width, height);
+
+    // Subtle ambient aura behind cube
+    const bgGlow = ctx.createRadialGradient(
+      state.cx, state.cy, state.scale * 0.2,
+      state.cx, state.cy, state.scale * 2.5
+    );
+    bgGlow.addColorStop(0, rgba(pal.primary, 0.14));
+    bgGlow.addColorStop(0.55, rgba(pal.secondary, 0.05));
+    bgGlow.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = bgGlow;
+    ctx.fillRect(0, 0, width, height);
+
+    // Floating cosmic dust
+    for (const d of dust) {
+      d.angle += d.speed * dt;
+      const dx = Math.cos(d.angle) * d.radius;
+      const dz = Math.sin(d.angle) * d.radius;
+      const [sx, sy] = project(dx, d.yOff, dz);
+      const twinkle = 0.35 + 0.65 * Math.abs(Math.sin(time * 2.2 + d.phase));
+      ctx.fillStyle = rgba(d.size > 2.1 ? pal.accent : pal.primary, twinkle * 0.75);
+      ctx.beginPath();
+      ctx.arc(sx, sy, d.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Back half of gyroscopic rings
+    drawGyroRings(pal, time, false);
+
+    // Inner glowing singularity core when expanded
+    const rotMat = buildRotMatrix(state.angleX, state.angleY, state.angleZ);
+    drawSingularityCore(rotMat, pal, time, state.expand);
+
+    // Visible faces of the cyber cube (sorted back-to-front)
+    const offsetMag = state.expand * 0.36;
+    const visibleFaces = [];
+
+    for (const face of FACE_DEFS) {
+      const [nx, ny, nz] = mulMat(rotMat, ...face.normal);
+      const quad3D = face.verts.map(([vx, vy, vz]) => {
+        const [rx, ry, rz] = mulMat(rotMat, vx, vy, vz);
+        return [rx + nx * offsetMag, ry + ny * offsetMag, rz + nz * offsetMag];
+      });
+      const quad2D = quad3D.map(([x, y, z]) => project(x, y, z));
+
+      // Back-face culling in screen space
+      const [p0, p1, p2] = quad2D;
+      const cross = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+      if (cross > 0) {
+        const avgZ = quad3D.reduce((acc, v) => acc + v[2], 0) * 0.25;
+        const shade = Math.max(0.2, Math.min(1.0, 0.65 - nz * 0.45));
+        visibleFaces.push({ avgZ, quad2D, shade });
+      }
+    }
+
+    visibleFaces.sort((a, b) => b.avgZ - a.avgZ);
+    for (const f of visibleFaces) {
+      drawModernFace(f.quad2D, f.shade, pal, time);
+    }
+
+    // Front half of gyroscopic rings
+    drawGyroRings(pal, time, true);
+
+    // Fixed-anchor dithering Unicode cipher bubble on hover
+    drawUnicodeBubble(pal, time);
+
+    // Live hex code pill HUD
+    drawHexHud(pal);
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
